@@ -37,6 +37,10 @@ module ThinkingSphinx
       initialize_from_builder(&block) if block_given?
     end
     
+    def name
+      model.name.underscore.tr(':/\\', '_')
+    end
+    
     def to_config(index, database_conf, charset_type)
       # Set up associations and joins
       link!
@@ -56,7 +60,7 @@ module ThinkingSphinx
       
       config = <<-SOURCE
 
-source #{model.name.downcase}_#{index}_core
+source #{model.indexes.first.name}_#{index}_core
 {
 type     = #{db_adapter}
 sql_host = #{database_conf[:host] || "localhost"}
@@ -77,9 +81,11 @@ sql_query_info   = #{to_sql_query_info}
       if delta?
         config += <<-SOURCE
 
-source #{model.name.downcase}_#{index}_delta : #{model.name.downcase}_#{index}_core
+source #{model.indexes.first.name}_#{index}_delta : #{model.indexes.first.name}_#{index}_core
 {
 sql_query_pre    = 
+sql_query_pre    = #{charset_type == "utf-8" && adapter == :mysql ? "SET NAMES utf8" : ""}
+#{"sql_query_pre    = SET SESSION group_concat_max_len = #{@options[:group_concat_max_len]}" if @options[:group_concat_max_len]}
 sql_query        = #{to_sql(:delta => true).gsub(/\n/, ' ')}
 sql_query_range  = #{to_sql_query_range :delta => true}
 }
@@ -176,8 +182,16 @@ GROUP BY #{ (
     # so pass in :delta => true to get the delta version of the SQL.
     # 
     def to_sql_query_range(options={})
-      sql = "SELECT MIN(#{quote_column(@model.primary_key)}), " +
-            "MAX(#{quote_column(@model.primary_key)}) " +
+      min_statement = "MIN(#{quote_column(@model.primary_key)})"
+      max_statement = "MAX(#{quote_column(@model.primary_key)})"
+      
+      # Fix to handle Sphinx PostgreSQL bug (it doesn't like NULLs or 0's)
+      if adapter == :postgres
+        min_statement = "COALESCE(#{min_statement}, 1)"
+        max_statement = "COALESCE(#{max_statement}, 1)"
+      end
+      
+      sql = "SELECT #{min_statement}, #{max_statement} " +
             "FROM #{@model.quoted_table_name} "
       sql << "WHERE #{@model.quoted_table_name}.#{quote_column('delta')} " + 
             "= #{options[:delta] ? db_boolean(true) : db_boolean(false)}" if self.delta?

@@ -6,29 +6,32 @@ module ThinkingSphinx
   # 
   # Here are the default settings, relative to RAILS_ROOT where relevant:
   #
-  # config file::      config/#{environment}.sphinx.conf
-  # searchd log file:: log/searchd.log
-  # query log file::   log/searchd.query.log
-  # pid file::         log/searchd.#{environment}.pid
-  # searchd files::    db/sphinx/#{environment}/
-  # address::          0.0.0.0 (all)
-  # port::             3312
-  # allow star::       false
-  # min prefix len::   1
-  # min infix len::    1
-  # mem limit::        64M
-  # max matches::      1000
-  # morphology::       stem_en
-  # charset type::     utf-8
-  # charset table::    nil
-  # ignore chars::     nil
+  # config file::           config/#{environment}.sphinx.conf
+  # searchd log file::      log/searchd.log
+  # query log file::        log/searchd.query.log
+  # pid file::              log/searchd.#{environment}.pid
+  # searchd files::         db/sphinx/#{environment}/
+  # address::               0.0.0.0 (all)
+  # port::                  3312
+  # allow star::            false
+  # min prefix length::     1
+  # min infix length::      1
+  # mem limit::             64M
+  # max matches::           1000
+  # morphology::            stem_en
+  # charset type::          utf-8
+  # charset table::         nil
+  # ignore chars::          nil
+  # html strip::            false
+  # html remove elements::  ''
   #
   # If you want to change these settings, create a YAML file at
   # config/sphinx.yml with settings for each environment, in a similar
   # fashion to database.yml - using the following keys: config_file,
   # searchd_log_file, query_log_file, pid_file, searchd_file_path, port,
   # allow_star, min_prefix_len, min_infix_len, mem_limit, max_matches,
-  # morphology, charset_type, charset_table, ignore_chars. I think you've got
+  # morphology, charset_type, charset_table, ignore_chars, html_strip,
+  # html_remove_elements. I think you've got
   # the idea.
   # 
   # Each setting in the YAML file is optional - so only put in the ones you
@@ -42,8 +45,8 @@ module ThinkingSphinx
     attr_accessor :config_file, :searchd_log_file, :query_log_file,
       :pid_file, :searchd_file_path, :address, :port, :allow_star,
       :min_prefix_len, :min_infix_len, :mem_limit, :max_matches, :morphology,
-      :charset_type, :charset_table, :ignore_chars, :app_root, :html_strip,
-      :html_remove_elements
+      :charset_type, :charset_table, :ignore_chars, :html_strip,
+      :html_remove_elements, :app_root
     
     attr_reader :environment
     
@@ -55,22 +58,24 @@ module ThinkingSphinx
       self.app_root          = Merb.root  if defined?(Merb)
       self.app_root        ||= app_root
       
-      self.config_file       = "#{self.app_root}/config/#{environment}.sphinx.conf"
-      self.searchd_log_file  = "#{self.app_root}/log/searchd.log"
-      self.query_log_file    = "#{self.app_root}/log/searchd.query.log"
-      self.pid_file          = "#{self.app_root}/log/searchd.#{environment}.pid"
-      self.searchd_file_path = "#{self.app_root}/db/sphinx/#{environment}"
-      self.address           = "0.0.0.0"
-      self.port              = 3312
-      self.allow_star        = false
-      self.min_prefix_len    = 1
-      self.min_infix_len     = 1
-      self.mem_limit         = "64M"
-      self.max_matches       = 1000
-      self.morphology        = "stem_en"
-      self.charset_type      = "utf-8"
-      self.charset_table     = nil
-      self.ignore_chars      = nil
+      self.config_file          = "#{self.app_root}/config/#{environment}.sphinx.conf"
+      self.searchd_log_file     = "#{self.app_root}/log/searchd.log"
+      self.query_log_file       = "#{self.app_root}/log/searchd.query.log"
+      self.pid_file             = "#{self.app_root}/log/searchd.#{environment}.pid"
+      self.searchd_file_path    = "#{self.app_root}/db/sphinx/#{environment}"
+      self.address              = "0.0.0.0"
+      self.port                 = 3312
+      self.allow_star           = false
+      self.min_prefix_len       = 1
+      self.min_infix_len        = 1
+      self.mem_limit            = "64M"
+      self.max_matches          = 1000
+      self.morphology           = "stem_en"
+      self.charset_type         = "utf-8"
+      self.charset_table        = nil
+      self.ignore_chars         = nil
+      self.html_strip           = false
+      self.html_remove_elements = ""
       
       parse_config
     end
@@ -128,8 +133,8 @@ searchd
             file.write index.to_config(i, database_conf, charset_type)
             
             create_array_accum if index.adapter == :postgres
-            sources << "#{model.name.downcase}_#{i}_core"
-            delta_sources << "#{model.name.downcase}_#{i}_delta" if index.delta?
+            sources << "#{model.indexes.first.name}_#{i}_core"
+            delta_sources << "#{model.indexes.first.name}_#{i}_delta" if index.delta?
           end
           
           source_list = sources.collect { |s| "source = #{s}" }.join("\n")
@@ -178,7 +183,7 @@ searchd
       path = "#{app_root}/config/sphinx.yml"
       return unless File.exists?(path)
       
-      conf = YAML.load(File.open(path))[environment]
+      conf = YAML::load(ERB.new(IO.read(path)).result)[environment]
       
       conf.each do |key,value|
         self.send("#{key}=", value) if self.methods.include?("#{key}=")
@@ -188,10 +193,10 @@ searchd
     def core_index_for_model(model, sources)
       output = <<-INDEX
 
-index #{model.name.downcase}_core
+index #{model.indexes.first.name}_core
 {
 #{sources}
-path = #{self.searchd_file_path}/#{model.name.downcase}_core
+path = #{self.searchd_file_path}/#{model.indexes.first.name}_core
 charset_type = #{self.charset_type}
 INDEX
       
@@ -208,8 +213,8 @@ INDEX
         output += "  min_infix_len  = #{self.min_infix_len}\n"
       end
       
-      output += "  html_strip     = #{self.html_strip}\n" if self.html_strip
-      output += "  html_remove_elements = #{self.html_remove_elements}\n" if self.html_remove_elements
+      output += "  html_strip     = 1\n" if self.html_strip
+      output += "  html_remove_elements = #{self.html_remove_elements}\n" unless self.html_remove_elements.blank?
 
       unless model.indexes.collect(&:prefix_fields).flatten.empty?
         output += "  prefix_fields = #{model.indexes.collect(&:prefix_fields).flatten.join(', ')}\n"
@@ -224,22 +229,22 @@ INDEX
     
     def delta_index_for_model(model, sources)
       <<-INDEX
-index #{model.name.downcase}_delta : #{model.name.downcase}_core
+index #{model.indexes.first.name}_delta : #{model.indexes.first.name}_core
 {
   #{sources}
-  path = #{self.searchd_file_path}/#{model.name.downcase}_delta
+  path = #{self.searchd_file_path}/#{model.indexes.first.name}_delta
 }
       INDEX
     end
     
     def distributed_index_for_model(model)
-      sources = ["local = #{model.name.downcase}_core"]
+      sources = ["local = #{model.indexes.first.name}_core"]
       if model.indexes.any? { |index| index.delta? }
-        sources << "local = #{model.name.downcase}_delta"
+        sources << "local = #{model.indexes.first.name}_delta"
       end
       
       <<-INDEX
-index #{model.name.downcase}
+index #{model.indexes.first.name}
 {
   type = distributed
   #{ sources.join("\n  ") }

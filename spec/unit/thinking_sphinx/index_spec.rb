@@ -59,6 +59,12 @@ describe ThinkingSphinx::Index do
         /sql_query_pre\s+= SET NAMES utf8/
       )
       
+      @index.stub_method(:delta? => true)
+      @index.to_config(0, @database, "utf-8").should match(
+        /source person_0_delta.+sql_query_pre\s+= SET NAMES utf8/m
+      )
+      
+      @index.stub_method(:delta? => false)
       @index.to_config(0, @database, "non-utf-8").should_not match(
         /SET NAMES utf8/
       )
@@ -85,6 +91,11 @@ describe ThinkingSphinx::Index do
       @index.options.merge! :group_concat_max_len => 2056
       @index.to_config(0, @database, "utf-8").should match(
         /sql_query_pre\s+= SET SESSION group_concat_max_len = 2056/
+      )
+      
+      @index.stub_method(:delta? => true)
+      @index.to_config(0, @database, "utf-8").should match(
+        /source person_0_delta.+sql_query_pre\s+= SET SESSION group_concat_max_len = 2056/m
       )
     end
     
@@ -156,6 +167,24 @@ describe ThinkingSphinx::Index do
       @index.to_config(0, @database, "utf-8").should match(
         /source person_0_delta.+sql_query_pre\s+=\s*\n/m
       )
+    end
+  end
+  
+  describe "to_sql_query_range method" do
+    before :each do
+      @index = ThinkingSphinx::Index.new(Person)
+    end
+    
+    it "should add COALESCE around MIN and MAX calls if using PostgreSQL" do
+      @index.stub_method(:adapter => :postgres)
+      
+      @index.to_sql_query_range.should match(/COALESCE\(MIN.+COALESCE\(MAX/)
+      puts @index.to_sql_query_range
+    end
+    
+    it "shouldn't add COALESCE if using MySQL" do
+      @index.to_sql_query_range.should_not match(/COALESCE/)
+      puts @index.to_sql_query_range
     end
   end
   
