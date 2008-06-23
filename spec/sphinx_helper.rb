@@ -1,6 +1,6 @@
 require 'active_record'
 require 'active_record/connection_adapters/mysql_adapter'
-require 'active_record/connection_adapters/postgresql_adapter'
+require 'active_record/connection_adapters/postgresql_adapter' if defined? ActiveRecord::ConnectionAdapters::PostgreSQLAdapter
 require 'yaml'
 require 'spec/fixtures/models'
 
