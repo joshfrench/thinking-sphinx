@@ -17,14 +17,8 @@ module ThinkingSphinx
         
         options = args.extract_options!
         page    = options[:page] ? options[:page].to_i : 1
-        
-        begin
-          pager = WillPaginate::Collection.new(page,
-            client.limit, results[:total] || 0)
-          pager.replace results[:matches].collect { |match| match[:doc] }
-        rescue
-          results[:matches].collect { |match| match[:doc] }
-        end
+
+        ThinkingSphinx::Collection.ids_from_results(results, page, client.limit, options)
       end
 
       # Searches through the Sphinx indexes for relevant matches. There's
@@ -49,6 +43,38 @@ module ThinkingSphinx
       # when loading the relevant models from the search results.
       # 
       #   User.search "pat", :include => :posts
+      #
+      # == Match Modes
+      #
+      # Sphinx supports 5 different matching modes. By default Thinking Sphinx
+      # uses :all, which unsurprisingly requires all the supplied search terms
+      # to match a result.
+      #
+      # Alternative modes include:
+      #
+      #   User.search "pat allan", :match_mode => :any
+      #   User.search "pat allan", :match_mode => :phrase
+      #   User.search "pat | allan", :match_mode => :boolean
+      #   User.search "@name pat | @username pat", :match_mode => :extended
+      #
+      # Any will find results with any of the search terms. Phrase treats the search
+      # terms a single phrase instead of individual words. Boolean and extended allow
+      # for more complex query syntax, refer to the sphinx documentation for further
+      # details.
+      #
+      # == Weighting
+      #
+      # Sphinx has support for weighting, where matches in one field can be considered
+      # more important than in another. Weights are integers, with 1 as the default.
+      # They can be set per-search like this:
+      #
+      #   User.search "pat allan", :field_weights => { :alias => 4, :aka => 2 }
+      #
+      # If you're searching multiple models, you can set per-index weights:
+      #
+      #   ThinkingSphinx::Search.search "pat", :index_weights => { User => 10 }
+      #
+      # See http://sphinxsearch.com/doc.html#weighting for further details.
       #
       # == Searching by Fields
       # 
@@ -129,8 +155,8 @@ module ThinkingSphinx
       # attributes. To search with that point, you can then use one of the
       # following syntax examples:
       # 
-      #   Address.search "Melbourne", :geo => [1.4, -2.217]
-      #   Address.search "Australia", :geo => [-0.55, 3.108],
+      #   Address.search "Melbourne", :geo => [1.4, -2.217], :order => "@geodist asc"
+      #   Address.search "Australia", :geo => [-0.55, 3.108], :order => "@geodist asc"
       #     :latitude_attr => "latit", :longitude_attr => "longit"
       # 
       # The first example applies when your latitude and longitude attributes
@@ -148,9 +174,9 @@ module ThinkingSphinx
       # 
       # Now, geo-location searching really only has an affect if you have a
       # filter, sort or grouping clause related to it - otherwise it's just a
-      # normal search. To make use of the positioning difference, use the
-      # special attribute "@geodist" in any of your filters or sorting or grouping
-      # clauses.
+      # normal search, and _will not_ return a distance value otherwise. To
+      # make use of the positioning difference, use the special attribute
+      # "@geodist" in any of your filters or sorting or grouping clauses.
       # 
       # And don't forget - both the latitude and longitude you use in your
       # search, and the values in your indexes, need to be stored as a float in radians,
@@ -161,6 +187,16 @@ module ThinkingSphinx
       #     has 'RADIANS(lat)', :as => :lat,  :type => :float
       #     # ...
       #   end
+      # 
+      # Once you've got your results set, you can access the distances as
+      # follows:
+      # 
+      # @results.each_with_geodist do |result, distance|
+      #   # ...
+      # end
+      # 
+      # The distance value is returned as a float, representing the distance in
+      # metres.
       # 
       def search(*args)
         results, client = search_results(*args.clone)
@@ -173,12 +209,40 @@ module ThinkingSphinx
         klass   = options[:class]
         page    = options[:page] ? options[:page].to_i : 1
         
+        ThinkingSphinx::Collection.create_from_results(results, page, client.limit, options)
+      end
+
+      def count(*args)
+        results, client = search_results(*args.clone)
+        results[:total] || 0
+      end
+
+      # Checks if a document with the given id exists within a specific index.
+      # Expected parameters:
+      #
+      # - ID of the document
+      # - Index to check within
+      # - Options hash (defaults to {})
+      # 
+      # Example:
+      # 
+      #   ThinkingSphinx::Search.search_for_id(10, "user_core", :class => User)
+      # 
+      def search_for_id(*args)
+        options = args.extract_options!
+        client  = client_from_options options
+        
+        query, filters    = search_conditions(
+          options[:class], options[:conditions] || {}
+        )
+        client.filters   += filters
+        client.match_mode = :extended unless query.empty?
+        client.id_range   = args.first..args.first
+        
         begin
-          pager = WillPaginate::Collection.new(page,
-            client.limit, results[:total] || 0)
-          pager.replace instances_from_results(results[:matches], options, klass)
-        rescue StandardError => err
-          instances_from_results(results[:matches], options, klass)
+          return client.query(query, args[1])[:matches].length > 0
+        rescue Errno::ECONNREFUSED => err
+          raise ThinkingSphinx::ConnectionError, "Connection to Sphinx Daemon (searchd) failed."
         end
       end
       
@@ -197,8 +261,9 @@ module ThinkingSphinx
         )
         client.filters   += filters
         client.match_mode = :extended unless query.empty?
-        query             = args.join(" ") + query
-        
+        query             = (args + [query]).join(' ')
+        query.strip!  # Because "" and " " are not equivalent
+                
         set_sort_options! client, options
         
         client.limit  = options[:per_page].to_i if options[:per_page]
@@ -208,7 +273,7 @@ module ThinkingSphinx
         begin
           ::ActiveRecord::Base.logger.debug "Sphinx: #{query}"
           results = client.query query
-          ::ActiveRecord::Base.logger.debug "Sphinx Result: #{results[:matches].collect{|m| m[:doc]}.inspect}"
+          ::ActiveRecord::Base.logger.debug "Sphinx Result: #{results[:matches].collect{|m| m[:attributes]["sphinx_internal_id"]}.inspect}"
         rescue Errno::ECONNREFUSED => err
           raise ThinkingSphinx::ConnectionError, "Connection to Sphinx Daemon (searchd) failed."
         end
@@ -216,53 +281,24 @@ module ThinkingSphinx
         return results, client
       end
       
-      def instances_from_results(results, options = {}, klass = nil)
-        if klass.nil?
-          results.collect { |result| instance_from_result result, options }
-        else
-          ids = results.collect { |result| result[:doc] }
-          instances = klass.find(
-            :all,
-            :conditions => {klass.primary_key.to_sym => ids},
-            :include    => options[:include],
-            :select     => options[:select]
-          )
-          ids.collect { |obj_id| instances.detect { |obj| obj.id == obj_id } }
-        end
-      end
-      
-      # Either use the provided class to instantiate a result from a model, or
-      # get the result's CRC value and determine the class from that.
-      # 
-      def instance_from_result(result, options)
-        class_from_crc(result[:attributes]["class_crc"]).find(
-          result[:doc], :include => options[:include], :select => options[:select]
-        )
-      end
-      
-      # Convert a CRC value to the corresponding class.
-      # 
-      def class_from_crc(crc)
-        unless @models_by_crc
-          Configuration.new.load_models
-          
-          @models_by_crc = ThinkingSphinx.indexed_models.inject({}) do |hash, model|
-            hash[model.constantize.to_crc32] = model
-            hash
-          end
-        end
-        
-        @models_by_crc[crc].constantize
-      end
-      
       # Set all the appropriate settings for the client, using the provided
       # options hash.
       # 
-      def client_from_options(options)
-        config = ThinkingSphinx::Configuration.new
+      def client_from_options(options = {})
+        config = ThinkingSphinx::Configuration.instance
         client = Riddle::Client.new config.address, config.port
         klass  = options[:class]
-        index_options = klass ? klass.indexes.last.options : {}
+        index_options = klass ? klass.sphinx_indexes.last.options : {}
+        
+        # Turn :index_weights => { "foo" => 2, User => 1 }
+        # into :index_weights => { "foo" => 2, "user_core" => 1 }
+        if iw = options[:index_weights]
+          options[:index_weights] = iw.inject({}) do |hash, (index,weight)|
+            key = index.is_a?(Class) ? "#{ThinkingSphinx::Index.name(index)}_core" : index
+            hash[key] = weight
+            hash
+          end
+        end
         
         [
           :max_matches, :match_mode, :sort_mode, :sort_by, :id_range,
@@ -276,14 +312,17 @@ module ThinkingSphinx
           )
         end
         
+        options[:classes] = [klass] if klass
+        
         client.anchor = anchor_conditions(klass, options) || {} if client.anchor.empty?
         
         client.filters << Riddle::Client::Filter.new(
           "sphinx_deleted", [0]
         )
+        
         # class filters
         client.filters << Riddle::Client::Filter.new(
-          "class_crc", options[:classes].collect { |klass| klass.to_crc32 }
+          "class_crc", options[:classes].collect { |k| k.to_crc32s }.flatten
         ) if options[:classes]
         
         # normal attribute filters
@@ -314,29 +353,24 @@ module ThinkingSphinx
       # and filters.
       # 
       def search_conditions(klass, conditions={})
-        attributes = klass ? klass.indexes.collect { |index|
+        attributes = klass ? klass.sphinx_indexes.collect { |index|
           index.attributes.collect { |attrib| attrib.unique_name }
         }.flatten : []
         
-        search_string = ""
+        search_string = []
         filters       = []
         
         conditions.each do |key,val|
           if attributes.include?(key.to_sym)
             filters << Riddle::Client::Filter.new(
-              key.to_s,
-              val.is_a?(Range) ? val : Array(val)
+              key.to_s, filter_value(val)
             )
           else
-            search_string << "@#{key} #{val} "
+            search_string << "@#{key} #{val}"
           end
         end
         
-        filters << Riddle::Client::Filter.new(
-          "class_crc", [klass.to_crc32]
-        ) if klass
-        
-        return search_string, filters
+        return search_string.join(' '), filters
       end
       
       # Return the appropriate latitude and longitude values, depending on
@@ -344,15 +378,15 @@ module ThinkingSphinx
       # there's actually any values.
       # 
       def anchor_conditions(klass, options)
-        attributes = klass ? klass.indexes.collect { |index|
+        attributes = klass ? klass.sphinx_indexes.collect { |index|
           index.attributes.collect { |attrib| attrib.unique_name }
         }.flatten : []
         
-        lat_attr = klass ? klass.indexes.collect { |index|
+        lat_attr = klass ? klass.sphinx_indexes.collect { |index|
           index.options[:latitude_attr]
         }.compact.first : nil
         
-        lon_attr = klass ? klass.indexes.collect { |index|
+        lon_attr = klass ? klass.sphinx_indexes.collect { |index|
           index.options[:longitude_attr]
         }.compact.first : nil
         
@@ -361,6 +395,7 @@ module ThinkingSphinx
         lat_attr ||= :latitude  if attributes.include?(:latitude)
         
         lon_attr = options[:longitude_attr] if options[:longitude_attr]
+        lon_attr ||= :lng       if attributes.include?(:lng)
         lon_attr ||= :lon       if attributes.include?(:lon)
         lon_attr ||= :long      if attributes.include?(:long)
         lon_attr ||= :longitude if attributes.include?(:longitude)
@@ -374,9 +409,9 @@ module ThinkingSphinx
         end
         
         lat && lon ? {
-          :latitude_attribute   => lat_attr,
+          :latitude_attribute   => lat_attr.to_s,
           :latitude             => lat,
-          :longitude_attribute  => lon_attr,
+          :longitude_attribute  => lon_attr.to_s,
           :longitude            => lon
         } : nil
       end
@@ -386,13 +421,13 @@ module ThinkingSphinx
       # 
       def set_sort_options!(client, options)
         klass = options[:class]
-        fields = klass ? klass.indexes.collect { |index|
+        fields = klass ? klass.sphinx_indexes.collect { |index|
           index.fields.collect { |field| field.unique_name }
         }.flatten : []
         
         case order = options[:order]
         when Symbol
-          client.sort_mode ||= :attr_asc
+          client.sort_mode = :attr_asc if client.sort_mode == :relevance || client.sort_mode.nil?
           if fields.include?(order)
             client.sort_by = order.to_s.concat("_sort")
           else

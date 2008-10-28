@@ -18,7 +18,7 @@ module Riddle
       def query_message
         message = Message.new
         
-        message.append_string self.attribute
+        message.append_string self.attribute.to_s
         case self.values
         when Range
           if self.values.first.is_a?(Float) && self.values.last.is_a?(Float)
@@ -33,7 +33,16 @@ module Riddle
           message.append_int self.values.length
           # using to_f is a hack from the php client - to workaround 32bit
           # signed ints on x32 platforms
-          message.append_ints *self.values.collect { |val| val.to_f }
+          message.append_ints *self.values.collect { |val|
+            case val
+            when TrueClass
+              1.0
+            when FalseClass
+              0.0
+            else
+              val.to_f
+            end
+          }
         end
         message.append_int self.exclude? ? 1 : 0
         

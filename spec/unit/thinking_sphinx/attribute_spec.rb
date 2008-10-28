@@ -17,7 +17,7 @@ describe ThinkingSphinx::Attribute do
   
   describe "to_select_sql method with MySQL" do
     before :each do
-      @index = Person.indexes.first
+      @index = Person.sphinx_indexes.first
       @index.link!
     end
     
@@ -52,7 +52,7 @@ describe ThinkingSphinx::Attribute do
   
   describe "to_select_sql method with PostgreSQL" do
     before :each do
-      @index = Person.indexes.first
+      @index = Person.sphinx_indexes.first
       Person.connection.class.stub_method(
         :name => "ActiveRecord::ConnectionAdapters::PostgreSQLAdapter"
       )
@@ -199,8 +199,12 @@ describe ThinkingSphinx::Attribute do
       @first_join   = Object.stub_instance(:aliased_table_name => "tabular")
       @second_join  = Object.stub_instance(:aliased_table_name => "data")
       
-      @first_assoc  = ThinkingSphinx::Association.stub_instance(:join => @first_join)
-      @second_assoc = ThinkingSphinx::Association.stub_instance(:join => @second_join)
+      @first_assoc  = ThinkingSphinx::Association.stub_instance(
+        :join => @first_join, :has_column? => true
+      )
+      @second_assoc = ThinkingSphinx::Association.stub_instance(
+        :join => @second_join, :has_column? => true
+      )
     end
     
     it "should return the column name if the column is a string" do
